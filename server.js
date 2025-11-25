@@ -2,6 +2,8 @@
 require("dotenv").config();
 const express = require("express");
 const path = require("path");
+const fs = require("fs");
+const axios = require("axios");
 const { google } = require("googleapis");
 
 const app = express();
@@ -9,7 +11,24 @@ const PORT = process.env.PORT || 3000;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const RANGE = "jugador!B2:AX";
 
+// Crear carpeta de fotos si no existe
+const photosDir = path.join(__dirname, "photos");
+if (!fs.existsSync(photosDir)) {
+  fs.mkdirSync(photosDir);
+}
 
+// 🔥 Normaliza nombres → sin tildes, sin ñ, sin caracteres raros
+function normalizeText(str) {
+  return str
+    .normalize("NFD")                  // separar tildes
+    .replace(/[\u0300-\u036f]/g, "")   // quitar tildes
+    .replace(/ñ/g, "n")
+    .replace(/Ñ/g, "N")
+    .toLowerCase()
+    .trim();
+}
+
+// Convierte link de Drive → link directo descargable
 function convertDriveUrl(url) {
   if (!url) return "";
 
@@ -30,14 +49,50 @@ function convertDriveUrl(url) {
   return url;
 }
 
-
-
-
-// Servir frontend
+// --- Servir frontend
 app.use(express.static(path.join(__dirname, "public")));
 
-app.get("/api/players", async (req, res) => {
+// --- Servir fotos locales
+app.use("/photos", express.static(path.join(__dirname, "photos")));
+
+// --- Cache RAM
+let cachedPlayers = null;
+let lastFetch = 0;
+const CACHE_TTL_MS = 60 * 1000;
+
+// Descargar imagen si no existe
+async function downloadPhoto(photoUrl, filename) {
+  const filepath = path.join(photosDir, filename);
+
+  if (fs.existsSync(filepath)) {
+    return; // ya existe, no descarga
+  }
+
   try {
+    const response = await axios({
+      url: photoUrl,
+      method: "GET",
+      responseType: "arraybuffer",
+    });
+
+    fs.writeFileSync(filepath, response.data);
+    console.log("📸 Foto guardada:", filename);
+  } catch (err) {
+    console.error("❌ Error descargando foto:", filename, err.message);
+  }
+}
+
+// --- API principal
+app.get("/api/players", async (req, res) => {
+  const now = Date.now();
+
+  // Cache válido → retorno inmediato
+  if (cachedPlayers && now - lastFetch < CACHE_TTL_MS) {
+    return res.json(cachedPlayers);
+  }
+
+  try {
+    // Llamar Google Sheets
     const auth = new google.auth.GoogleAuth({
       keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
       scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"]
@@ -53,33 +108,59 @@ app.get("/api/players", async (req, res) => {
 
     const rows = response.data.values || [];
 
-    const idxName = 0;       // Columna B → primer col del rango
-    const idxPhoto = 31 - 2; // Columna AE (31) → 29
-    const idxBalance = 50 - 2; // Columna AX (50) → 48
+    const idxName = 0;
+    const idxPhoto = 29;
+    const idxBalance = 48;
 
-    const players = rows.map(r => {
+    const players = [];
+
+    for (const r of rows) {
       const name = (r[idxName] || "").trim();
       let balance = (r[idxBalance] || "0").trim();
 
-      // ✅ AQUI la regla especial para Jesús David
-      if (name.toLowerCase() === "jesus david traslavina fuentes".toLowerCase()) {
+      // regla especial
+      if (name.toLowerCase() === "jesus david traslavina fuentes") {
         balance = "0";
       }
 
-      return {
+      const driveUrl = convertDriveUrl((r[idxPhoto] || "").trim());
+
+      // 🔥 NORMALIZAR NOMBRE PARA USARLO COMO ARCHIVO
+      const safeName = normalizeText(name);
+      const filename = safeName.replace(/\s+/g, "_") + ".jpg";
+
+      // Descargar foto si no existe
+      if (driveUrl) {
+        await downloadPhoto(driveUrl, filename);
+      }
+
+      const localPhotoUrl = `/photos/${filename}`;
+
+      players.push({
         name,
-        photo: convertDriveUrl((r[idxPhoto] || "").trim()),
+        photo: localPhotoUrl,
         balance
-      };
-    });
+      });
+    }
+
+    // Guardar en cache RAM
+    cachedPlayers = players;
+    lastFetch = now;
 
     res.json(players);
+
   } catch (err) {
     console.error("ERROR /api/players:", err);
+
+    if (cachedPlayers) {
+      return res.json(cachedPlayers);
+    }
+
     res.status(500).json({ error: err.message });
   }
 });
 
+// Servidor
 app.listen(PORT, () => {
   console.log(`✅ Backend funcionando en http://localhost:${PORT}`);
 });
