@@ -1,4 +1,3 @@
-// server.js
 require("dotenv").config();
 const express = require("express");
 const path = require("path");
@@ -8,94 +7,104 @@ const { google } = require("googleapis");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Config
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const RANGE = "jugador!B2:AX";
+const CACHE_FILE = path.join(__dirname, "cache.json");
+const PHOTOS_DIR = path.join(__dirname, "photos");
+const SYNC_INTERVAL_MS = 60 * 1000; // 60 seconds
 
-// Crear carpeta de fotos si no existe
-const photosDir = path.join(__dirname, "photos");
-if (!fs.existsSync(photosDir)) {
-  fs.mkdirSync(photosDir);
+// Ensure photos directory exists
+if (!fs.existsSync(PHOTOS_DIR)) {
+  fs.mkdirSync(PHOTOS_DIR);
 }
 
-// 🔥 Normaliza nombres → sin tildes, sin ñ, sin caracteres raros
+// --- IN-MEMORY STATE ---
+let cachedPlayers = [];
+let lastSyncTime = 0;
+
+// --- UTILS ---
+
+// Normalize text for filenames
 function normalizeText(str) {
   return str
-    .normalize("NFD")                  // separar tildes
-    .replace(/[\u0300-\u036f]/g, "")   // quitar tildes
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
     .replace(/ñ/g, "n")
     .replace(/Ñ/g, "N")
-    .toLowerCase()
-    .trim();
+    .replace(/[^a-zA-Z0-9 ]/g, "") // Remove special chars
+    .trim()
+    .toLowerCase();
 }
 
-// Convierte link de Drive → link directo descargable
+// Convert Drive URL to direct download URL
 function convertDriveUrl(url) {
   if (!url) return "";
-
+  // Direct ID match (common in some copy-paste scenarios)
   if (/^[a-zA-Z0-9_-]{20,}$/.test(url)) {
     return `https://drive.google.com/thumbnail?id=${url}&sz=w1000`;
   }
-
+  // Standard /file/d/ format
   const match1 = url.match(/\/file\/d\/([^/]+)\//);
   if (match1) {
     return `https://drive.google.com/thumbnail?id=${match1[1]}&sz=w1000`;
   }
-
+  // Query param id= format
   const match2 = url.match(/id=([^&]+)/);
   if (match2) {
     return `https://drive.google.com/thumbnail?id=${match2[1]}&sz=w1000`;
   }
-
   return url;
 }
 
-// --- Servir frontend
-app.use(express.static(path.join(__dirname, "public")));
+// --- CORE LOGIC ---
 
-// --- Servir fotos locales
-app.use("/photos", express.static(path.join(__dirname, "photos")));
-
-// --- Cache RAM
-let cachedPlayers = null;
-let lastFetch = 0;
-const CACHE_TTL_MS = 60 * 1000;
-
-// Descargar imagen si no existe
-async function downloadPhoto(photoUrl, filename) {
-  const filepath = path.join(photosDir, filename);
-
-  if (fs.existsSync(filepath)) {
-    return; // ya existe, no descarga
-  }
-
+// Load cache from disk on startup
+function loadCacheFromDisk() {
   try {
-    const response = await axios({
-      url: photoUrl,
-      method: "GET",
-      responseType: "arraybuffer",
-    });
-
-    fs.writeFileSync(filepath, response.data);
-    console.log("📸 Foto guardada:", filename);
+    if (fs.existsSync(CACHE_FILE)) {
+      const data = fs.readFileSync(CACHE_FILE, "utf8");
+      cachedPlayers = JSON.parse(data);
+      console.log(`💾 Loaded ${cachedPlayers.length} players from disk cache.`);
+    }
   } catch (err) {
-    console.error("❌ Error descargando foto:", filename, err.message);
+    console.error("⚠️ Error loading disk cache:", err.message);
   }
 }
 
-// --- API principal
-app.get("/api/players", async (req, res) => {
-  const now = Date.now();
+// Background Image Downloader
+async function downloadMissingImages(players) {
+  for (const p of players) {
+    if (!p.driveUrl) continue;
 
-  // Cache válido → retorno inmediato
-  if (cachedPlayers && now - lastFetch < CACHE_TTL_MS) {
-    return res.json(cachedPlayers);
+    const filename = p.filename;
+    const filepath = path.join(PHOTOS_DIR, filename);
+
+    if (!fs.existsSync(filepath)) {
+      try {
+        console.log(`⬇️ Downloading photo for: ${p.name}`);
+        const response = await axios({
+          url: p.driveUrl,
+          method: "GET",
+          responseType: "arraybuffer",
+          timeout: 10000, // 10s timeout
+        });
+        fs.writeFileSync(filepath, response.data);
+      } catch (err) {
+        console.error(`❌ Failed to download photo for ${p.name}:`, err.message);
+      }
+    }
   }
+}
 
+// Main Sync Function
+async function syncData() {
+  console.log("🔄 Starting background sync...");
   try {
-    // Llamar Google Sheets
     const auth = new google.auth.GoogleAuth({
       keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+      scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
     });
 
     const client = await auth.getClient();
@@ -103,64 +112,81 @@ app.get("/api/players", async (req, res) => {
 
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: RANGE
+      range: RANGE,
     });
 
     const rows = response.data.values || [];
-
     const idxName = 0;
     const idxPhoto = 29;
     const idxBalance = 48;
 
-    const players = [];
+    const newPlayers = [];
 
     for (const r of rows) {
       const name = (r[idxName] || "").trim();
+      if (!name) continue; // Skip empty names
+
       let balance = (r[idxBalance] || "0").trim();
 
-      // regla especial
+      // Special rule
       if (name.toLowerCase() === "jesus david traslavina fuentes") {
         balance = "0";
       }
 
       const driveUrl = convertDriveUrl((r[idxPhoto] || "").trim());
-
-      // 🔥 NORMALIZAR NOMBRE PARA USARLO COMO ARCHIVO
       const safeName = normalizeText(name);
       const filename = safeName.replace(/\s+/g, "_") + ".jpg";
 
-      // Descargar foto si no existe
-      if (driveUrl) {
-        await downloadPhoto(driveUrl, filename);
-      }
-
-      const localPhotoUrl = `/photos/${filename}`;
-
-      players.push({
+      newPlayers.push({
         name,
-        photo: localPhotoUrl,
-        balance
+        balance,
+        photo: `/photos/${filename}`, // Public URL
+        filename, // Internal use for downloader
+        driveUrl, // Internal use for downloader
       });
     }
 
-    // Guardar en cache RAM
-    cachedPlayers = players;
-    lastFetch = now;
+    // Atomic update of memory cache
+    cachedPlayers = newPlayers;
+    lastSyncTime = Date.now();
 
-    res.json(players);
+    // Persist to disk
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(newPlayers, null, 2));
+    console.log(`✅ Synced ${newPlayers.length} players. Data saved to disk.`);
+
+    // Trigger image download in background (don't await)
+    downloadMissingImages(newPlayers);
 
   } catch (err) {
-    console.error("ERROR /api/players:", err);
-
-    if (cachedPlayers) {
-      return res.json(cachedPlayers);
-    }
-
-    res.status(500).json({ error: err.message });
+    console.error("🔥 Sync failed:", err.message);
+    // On error, we just keep the old cache.
   }
+}
+
+// --- SERVER SETUP ---
+
+// 1. Load initial state
+loadCacheFromDisk();
+
+// 2. Start background loop
+// Run immediately on start (non-blocking)
+syncData();
+// Schedule interval
+setInterval(syncData, SYNC_INTERVAL_MS);
+
+// 3. Middleware
+app.use(express.static(path.join(__dirname, "public")));
+app.use("/photos", express.static(PHOTOS_DIR, { maxAge: "1d" })); // Cache photos for 1 day
+
+// 4. API Endpoint
+app.get("/api/players", (req, res) => {
+  // Ultra-fast response from memory
+  res.set("Cache-Control", "public, max-age=30"); // Browser cache 30s
+  res.json(cachedPlayers);
 });
 
-// Servidor
+// 5. Start Server
 app.listen(PORT, () => {
-  console.log(`✅ Backend funcionando en http://localhost:${PORT}`);
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`⚡ Mode: High Performance (Background Sync + RAM Cache)`);
 });
