@@ -3,3 +3,5 @@
 service-account.json
 .DS_Store
 /photos__
+
+/frontend/node_modules

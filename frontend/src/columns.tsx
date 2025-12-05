@@ -12,9 +12,62 @@ import { ColumnDef } from "@tanstack/react-table"
 import { ArrowUpDown, MoreHorizontal } from "lucide-react"
 
 export type Player = {
+    id: string
+    nombre: string
+    apodo: string
+    numero: string
+    nacimiento: string
+    edad: number
+    sexo: string
+    activo: string
+    lesiones: string
+    caracter: string
+    fortalezas: string
+    debilidades: string
+    velocidad: number
+    resistencia: number
+    fuerza: number
+    cabeza: number
+    tiro: number
+    defenza: number
+    ataque: number
+    pase: number
+    tiro_2: number
+    goles: number
+    amarillas: number
+    rojas: number
+    asistencias: number
+    atajadas: number
+    mejor_tiempo: string
+    roles: string
+    posicion: string
+    posicion_secundaria: string
+    foto: string
+    contacto_emergencia: string
+    contacto_propio: string
+    documento: string
+    apariciones: number
+    puntualidad: number
+    disputados: number
+    partidos_pagos: number
+    deuda_partidos: number
+    amarillas_pagas: number
+    rojas_pagas: number
+    deuda_tarjetas: number
+    deuda_uniformes: number
+    deuda_inscripcion: number
+    aporte_total: number
+    deuda_total: number
+    bonos: number
+    pares_de_amarillas: number
+    arco_cero: number
+    balance_neto: number
+    entrenamientos: number
+
+    // Computed/Legacy
     name: string
+    balance: string | number // Allow both for compatibility during transition
     photo: string
-    balance: string
 }
 
 export const columns = (onViewDetails: (player: Player) => void): ColumnDef<Player>[] => [
@@ -71,7 +124,8 @@ export const columns = (onViewDetails: (player: Player) => void): ColumnDef<Play
         accessorKey: "status",
         header: "Status",
         cell: ({ row }) => {
-            const balance = parseFloat(row.original.balance)
+            const val = row.original.balance
+            const balance = typeof val === 'string' ? parseFloat(val) : val
             let status = "Settled"
             let color = "text-yellow-600 bg-yellow-100"
 
@@ -94,7 +148,8 @@ export const columns = (onViewDetails: (player: Player) => void): ColumnDef<Play
         accessorKey: "balance",
         header: () => <div className="text-right">Balance</div>,
         cell: ({ row }) => {
-            const amount = parseFloat(row.getValue("balance"))
+            const val = row.getValue("balance") as string | number
+            const amount = typeof val === 'string' ? parseFloat(val) : val
             const formatted = new Intl.NumberFormat("en-US", {
                 style: "currency",
                 currency: "USD",

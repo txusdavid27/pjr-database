@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 
 // Config
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-const RANGE = "jugador!B2:AX";
+const RANGE = "jugador!A2:AY";
 const CACHE_FILE = path.join(__dirname, "cache.json");
 const PHOTOS_DIR = path.join(__dirname, "photos");
 const SYNC_INTERVAL_MS = 60 * 1000; // 60 seconds
@@ -56,6 +56,19 @@ function convertDriveUrl(url) {
     return `https://drive.google.com/thumbnail?id=${match2[1]}&sz=w1000`;
   }
   return url;
+}
+
+// Helper to parse numbers safely
+function parseNum(val) {
+  if (!val) return 0;
+  // Remove currency symbols, dots (thousands), replace comma with dot if needed
+  // Assuming format might be "1.000" or "1,000" or "$ 1000"
+  // Simple approach: remove everything except digits, minus sign.
+  // BUT, we need to handle decimals.
+  // Let's assume standard input. If it has non-numeric chars, strip them.
+  const clean = val.toString().replace(/[^0-9.-]/g, "");
+  const num = parseFloat(clean);
+  return isNaN(num) ? 0 : num;
 }
 
 // --- CORE LOGIC ---
@@ -116,34 +129,99 @@ async function syncData() {
     });
 
     const rows = response.data.values || [];
-    const idxName = 0;
-    const idxPhoto = 29;
-    const idxBalance = 48;
-
     const newPlayers = [];
 
+    // Column Indices based on A=0
+    // A=0, B=1, ..., AX=49
+
     for (const r of rows) {
-      const name = (r[idxName] || "").trim();
-      if (!name) continue; // Skip empty names
+      // Helper to get value at index safely
+      const get = (i) => (r[i] || "").trim();
 
-      let balance = (r[idxBalance] || "0").trim();
+      const id = get(0);
+      const nombre = get(1);
 
-      // Special rule
-      if (name.toLowerCase() === "jesus david traslavina fuentes") {
-        balance = "0";
+      if (!nombre) continue; // Skip if no name
+
+      // Map all fields
+      const player = {
+        id: id,
+        nombre: nombre,
+        apodo: get(2),
+        numero: get(3),
+        nacimiento: get(4),
+        edad: parseNum(get(5)),
+        sexo: get(6),
+        activo: get(7),
+        lesiones: get(8),
+        caracter: get(9),
+        fortalezas: get(10),
+        debilidades: get(11),
+        velocidad: parseNum(get(12)),
+        resistencia: parseNum(get(13)),
+        fuerza: parseNum(get(14)),
+        cabeza: parseNum(get(15)),
+        tiro: parseNum(get(16)),
+        defenza: parseNum(get(17)),
+        ataque: parseNum(get(18)),
+        pase: parseNum(get(19)),
+        tiro_2: parseNum(get(20)), // Repeated field
+        goles: parseNum(get(21)),
+        amarillas: parseNum(get(22)),
+        rojas: parseNum(get(23)),
+        asistencias: parseNum(get(24)),
+        atajadas: parseNum(get(25)),
+        mejor_tiempo: get(26),
+        roles: get(27),
+        posicion: get(28),
+        posicion_secundaria: get(29),
+        // Photo is at index 30 (Column AE)
+        // Wait, let's verify indices carefully.
+        // List provided:
+        // 0:id, 1:nombre, ..., 29:posicion_secundaria, 30:foto
+        foto_url_raw: get(30),
+        contacto_emergencia: get(31),
+        contacto_propio: get(32),
+        documento: get(33),
+        apariciones: parseNum(get(34)),
+        puntualidad: parseNum(get(35)),
+        disputados: parseNum(get(36)),
+        partidos_pagos: parseNum(get(37)),
+        deuda_partidos: parseNum(get(38)),
+        amarillas_pagas: parseNum(get(39)),
+        rojas_pagas: parseNum(get(40)),
+        deuda_tarjetas: parseNum(get(41)),
+        deuda_uniformes: parseNum(get(42)),
+        deuda_inscripcion: parseNum(get(43)),
+        aporte_total: parseNum(get(44)),
+        deuda_total: parseNum(get(45)),
+        bonos: parseNum(get(46)),
+        pares_de_amarillas: parseNum(get(47)),
+        arco_cero: parseNum(get(48)),
+        balance_neto: parseNum(get(49)), // AX
+        entrenamientos: parseNum(get(50)),
+      };
+
+      // Special rule for specific user (legacy logic preserved)
+      if (player.nombre.toLowerCase() === "jesus david traslavina fuentes") {
+        player.balance_neto = 0;
       }
 
-      const driveUrl = convertDriveUrl((r[idxPhoto] || "").trim());
-      const safeName = normalizeText(name);
+      // Handle Photo Logic
+      const driveUrl = convertDriveUrl(player.foto_url_raw);
+      const safeName = normalizeText(player.nombre);
       const filename = safeName.replace(/\s+/g, "_") + ".jpg";
 
-      newPlayers.push({
-        name,
-        balance,
-        photo: `/photos/${filename}`, // Public URL
-        filename, // Internal use for downloader
-        driveUrl, // Internal use for downloader
-      });
+      // Add computed fields for frontend
+      player.photo = `/photos/${filename}`;
+      player.filename = filename;
+      player.driveUrl = driveUrl;
+
+      // Backward compatibility for existing frontend (optional but good practice)
+      player.name = player.nombre;
+      player.balance = player.balance_neto; // Map to old field name if needed by current UI before update
+
+      newPlayers.push(player);
     }
 
     // Atomic update of memory cache
